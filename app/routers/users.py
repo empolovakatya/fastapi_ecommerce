@@ -99,15 +99,44 @@ async def refresh_token(
 
     return {"refresh_token": new_refresh_token, "token_type": "bearer"}
 
-"""
-Реализуйте систему получения нового access-токена по действующему refresh-токену. 
-Для этого необходим эндпоинт, который принимает refresh-токен в теле запроса, 
-проверяет его подлинность, срок действия и корректность структуры токена. 
-Важно, чтобы токен имел тип "refresh", иначе сервер должен отклонить запрос.
+@router.post("/access-token")
+async def access_token(
+        body: RefreshTokenRequest,
+        db: AsyncSession = Depends(get_async_db),
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
-После успешной проверки сервер извлекает из токена идентификатор пользователя, 
-находит его в базе данных и убеждается, что он активен. 
-Если пользователь существует и refresh-токен валиден, сервер создаёт новый access-токен 
-с обновлённым временем истечения и возвращает его клиенту. Сам refresh-токен при этом 
-не обновляется и остаётся прежним, пока не истечёт или не будет заменён отдельным эндпоинтом ротации.
-"""
+    refresh_token = body.refresh_token
+
+    try:
+        payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str | None = payload.get("sub")
+        token_type: str | None = payload.get("token_type")
+
+        if email is None or token_type != "refresh":
+            raise credentials_exception
+
+    except jwt.ExpiredSignatureError:
+        raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+
+    result = await db.scalars(
+        select(UserModel).where(
+            UserModel.email == email,
+            UserModel.is_active == True
+        )
+    )
+    user = result.first()
+    if user is None:
+        raise credentials_exception
+
+    new_access_token = create_access_token(
+        data={"sub": user.email, "role": user.role, "id": user.id}
+    )
+
+    return {"access_token": new_access_token, "token_type": "bearer"}
